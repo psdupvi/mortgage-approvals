@@ -1,0 +1,511 @@
+---
+title: "Binary Classification of Mortgage Approval from Government Data"
+author: "Pierre du Pont"
+date: "April 22, 2019"
+output: pdf_document
+papersize: letter
+---
+
+```{r setup, include=FALSE, warnings = FALSE}
+knitr::opts_chunk$set(	echo = FALSE,	message = FALSE,	warning = FALSE)
+library(tidyverse)
+library(caret)
+library(corrplot)
+library(Hmisc)
+library(knitr)
+
+rm(list = ls())
+train_values <- read_csv('train_values.csv')
+test <- read_csv('test_values.csv')
+
+train_values$applicant_income <- with(train_values, impute(applicant_income, median))
+train_values$population <- with(train_values, impute(population, median))
+
+
+
+colnames(train_values)[colnames(train_values) == 'number_of_owner-occupied_units'] = 'number_of_owner_occupied_units'
+colnames(test)[colnames(test) == 'number_of_owner-occupied_units'] = 'number_of_owner_occupied_units'
+## Change column names in train and test which don't parse well
+
+drops = c('number_of_owner_occupied_units', 'number_of_1_to_4_family_units')
+train_values <- train_values[, !names(train_values) %in% drops]
+test <- test[, !names(test) %in% drops]
+## Identify list of columns to drop and then drops them
+### These were selected either because they were collinear (state and county code to msa_md)
+### or because they had NA and were generally unrelated, according to some visualizations
+
+
+## Find acceptance rate for lender
+df <- train_values %>% group_by(lender) %>%  summarise(lender_acceptance_rate = mean(accepted), count = n())
+train_values <- merge(train_values,df, by = 'lender')
+test <- merge(test,df, by = 'lender', all.x = TRUE)
+train_values$lender_acceptance_rate <- impute(train_values$lender_acceptance_rate, median)
+test$lender_acceptance_rate <- impute(test$lender_acceptance_rate, median)
+
+## Combine the labels and the values of the training set
+
+factors <- c('msa_md','lender','loan_type','property_type',
+             'loan_purpose','occupancy', 'preapproval', 'applicant_ethnicity',
+             'applicant_race','applicant_sex','row_id', 'state_code','county_code')
+
+
+## Create a list of factor variables
+test[,factors] <- lapply(test[,factors], factor)
+train_values[,factors] <- lapply(train_values[, factors], factor)
+train_values$accepted <- as.factor(train_values$accepted)
+train_values$co_applicant <- as.factor(as.numeric(train_values$co_applicant))
+test$co_applicant <- as.factor(as.numeric(test$co_applicant))
+
+train_values$ffiecmedian_family_income <- impute(train_values$ffiecmedian_family_income,median)
+test$ffiecmedian_family_income <- impute(test$ffiecmedian_family_income,median)
+## Turn all factor variables into factors and convert accepted into bool
+train_values <- train_values %>% mutate(percent_of_income = applicant_income/ffiecmedian_family_income)
+train_values <- train_values %>% mutate(loan_percent = loan_amount/applicant_income)
+test <- test %>% mutate(loan_percent = loan_amount/applicant_income)
+test <- test %>% mutate(percent_of_income = applicant_income/ffiecmedian_family_income)
+test$percent_of_income <- impute(test$percent_of_income, median)
+test$loan_percent <- impute(test$loan_percent, median)
+
+
+
+## Find acceptance rate for msa_md
+df <- train_values %>% group_by(msa_md,state_code,county_code) %>%  summarise(msa_md_acceptance_rate = mean(as.numeric(accepted))-1, count = n()) 
+train_values <- merge(train_values,df, by = c('msa_md','state_code','county_code'))
+test <- merge(test,df, by = c('msa_md','state_code','county_code'), all.x = TRUE)
+train_values$msa_md_acceptance_rate <- impute(train_values$msa_md_acceptance_rate, median)
+test$msa_md_acceptance_rate <- impute(test$msa_md_acceptance_rate, median)
+
+## Find acceptance rate for race
+df <- train_values %>% group_by(applicant_race,applicant_ethnicity) %>%  summarise(race_acceptance_rate = mean(as.numeric(accepted))-1) 
+train_values <- merge(train_values,df, by = c('applicant_race','applicant_ethnicity'))
+test <- merge(test,df, by = c('applicant_race','applicant_ethnicity'), all.x = TRUE)
+train_values$race_acceptance_rate <- impute(train_values$race_acceptance_rate, median)
+test$race_acceptance_rate <- impute(test$race_acceptance_rate, median)
+
+df  <- train_values %>% group_by(occupancy,property_type) %>% summarise(occ_prop_rate = mean(as.numeric(as.character(accepted))))
+train_values <- merge(train_values,df, by = c('occupancy','property_type'))
+test <- merge(test,df, by = c('occupancy','property_type'), all.x = TRUE)
+train_values$occ_prop_rate <- impute(train_values$occ_prop_rate, median)
+test$occ_prop_rate <- impute(test$occ_prop_rate, median)
+
+df  <- train_values %>% group_by(preapproval,loan_type) %>% summarise(pre_type_rate = mean(as.numeric(as.character(accepted))))
+train_values <- merge(train_values,df, by = c('preapproval','loan_type'))
+test <- merge(test,df, by = c('preapproval','loan_type'), all.x = TRUE)
+train_values$pre_type_rate <- impute(train_values$pre_type_rate, median)
+test$pre_type_rate <- impute(test$pre_type_rate, median)
+
+training <- train_values %>% mutate_if(is.numeric,scale)
+test <- test %>% mutate_if(is.numeric,scale)
+test <- test[order(test$row_id),]
+# Scale the numeric variables
+
+
+set.seed(1)
+# Set seed for reproducibility
+test_index <- createDataPartition(y = training$accepted, times = 1, p = 0.1, list = FALSE)
+split_train <- training[-test_index,]
+split_test <- training[test_index,]
+
+results <- read_csv('results.csv')
+
+factors <- c('msa_md','lender','loan_type','property_type',
+             'loan_purpose','occupancy', 'preapproval', 'applicant_ethnicity',
+             'applicant_race','applicant_sex','row_id', 'state_code','county_code')
+
+
+
+
+
+
+unchanged_train_values <- read_csv('train_values.csv')
+unchanged_test_values <- read_csv('test_values.csv')
+
+unchanged_test_values[,factors] <- lapply(unchanged_test_values[,factors], factor)
+unchanged_train_values[,factors] <- lapply(unchanged_train_values[, factors], factor)
+unchanged_train_values$accepted <- as.factor(unchanged_train_values$accepted)
+unchanged_train_values$co_applicant <- as.factor(as.numeric(unchanged_train_values$co_applicant))
+unchanged_test_values$co_applicant <- as.factor(as.numeric(unchanged_test_values$co_applicant))
+
+
+```
+
+# Executive Summary
+
+This document presents an analysis of data concerning mortgages and their approval.  This analysis is based on data adapted from a datest ccreated by the [Federal Financial Institutions Exemination Council (FFIEC)](https://www.ffiec.gov/hmda/hmdaflat.htm).  The data included one million total observations split into two sets&mdash;a test set with `r nrow(test)` observations and a training set with `r nrow(train_values)` observations.  Each observation contains information around the applicant, the loan, and whether it was accepted.  This report and analysis operates on the assumption that the train set is representative of the test set. 
+
+Initial analysis was completed by calculating summary and descriptive statistics along with visualizations of the data. After exploring the data, several models were used to predict mortgage acceptance in the test set.  Throughout this process, additional features were created to more accurately represent important factors in mortgage acceptance.  
+
+After performing the analysis, the author presents the following conclusions:  
+
+Many factors are necessary to accurately predict mortgage approval.  Significant features found in this analysis included  
+
+* **Loan Percent of Income** &ndash; the ratio of the loan amount to the applicant's annual income.  Applicants with a higher ratio were less likely to be accepted.
+
+* **MSA MD, State, and County** &ndash; certain localities had much higher acceptance rates than others, perhaps based on the average income of those localities.  More analysis needs to be done to determine the cause.
+
+* **Applicant Sex, Race, and Ethnicity** &ndash; despite laws against housing discrimination based on (among other things) race, gender, or ethnicity, there was a substantial difference between different races.  Applicants who were white and/or male were more likely to be approved than other groups.  
+
+* **Loan Purpose** &ndash; home purchases were more likely to be accepted than re-financing or home improvement.
+
+* **Co-Applicant** &ndash; people who applied with a co-applicant (for example, a spouse) were more likely to be accepted
+
+# Initial Data Exploration
+The initial exploration of the data began with some summary and descriptive statistics around the train set.   The columns in the data set are as follows (with descriptions taken from [the HMDA Loan Application Register code sheet](https://www.ffiec.gov/hmdarawdata/FORMATS/2015HMDACodeSheet.pdf))
+
+## Feature Information
+
+##### Row ID 
+A unique identifier with no intrinsic meaning
+
+##### Loan Type 
+Indicates whether the loan granted, applied for, or purchased was conventional, government-guaranteed, or government-insured; available values are:
+
+1. Conventional (any loan other than FHA, VA, FSA, or RHS loans)
+2. FHA-insured (Federal Housing Administration)
+3. VA-guaranteed (Veterans Administration)
+4. FSA/RHS (Farm Service Agency or Rural Housing Service)
+
+##### Property Type (categorical)
+Indicates whether the loan or application was for a one-to-four-family dwelling (other than manufactured housing), manufactured housing, or multifamily dwelling; available values are:
+
+1. One to four-family (other than manufactured housing)
+2. Manufactured housing
+3. Multifamily
+
+##### Lender (categorical) 
+A categorical with no ordering indicating which of the lenders was the authority in approving or denying this loan
+
+##### Loan Amount (int)
+Size of the requested loan in thousands of dollars
+
+##### Loan Purpose (categorical)
+Indicates whether the purpose of the loan or application was for home purchase, home improvement, or refinancing; available values are:
+
+1. Home purchase
+2. Home improvement
+3. Refinancing 
+ 
+##### Occupancy (categorical)
+Indicates whether the property to which the loan application relates will be the owner's principal dwelling; available values are:
+
+1. Owner-occupied as a principal dwelling
+2. Not owner-occupied
+3. Not applicable
+
+##### Preapproval (categorical)
+Indicate whether the application or loan involved a request for a pre-approval of a home purchase loan; available values are:
+
+1. Preapproval was requested
+2. Preapproval was not requested
+3. Not applicable
+
+##### MSA MD (categorical)
+A categorical with no ordering indicating Metropolitan Statistical Area/Metropolitan Division where a value of -1 indicates a missing value. 
+
+##### State Code (categorical) 
+A categorical with no ordering indicating the U.S. state where a value of -1 indicates a missing value
+
+##### County Code (categorical) 
+A categorical with no ordering indicating the county where a value of -1 indicates a missing value
+
+##### Applicant Income (int)
+Applicant income in thousands of dollars
+
+##### Applicant Ethnicity (categorical) 
+Ethnicity of the applicant; available values are:
+
+1. Hispanic or Latino
+2. Not Hispanic or Latino
+3. Information not provided by applicant in mail, Internet, or telephone pplication
+4. Not applicable
+
+##### Applicant Race (categorical)
+Race of the applicant; available values are:
+
+1. American Indian or Alaska Native
+2. Asian
+3. Black or African American
+4. Native Hawaiian or Other Pacific Islander
+5. White
+6. Information not provided by applicant in mail, Internet, or telephone application
+7. Not applicable
+
+##### Applicant Sex (categorical)
+Sex of the applicant; available values are:
+
+1. Male
+2. Female
+3. Information not provided by applicant in mail, Internet, or telephone application
+4. Not applicable
+
+##### Population
+Total population in tract
+
+##### Minority Population Pct
+Percentage of minority population to total population for tract
+
+##### FFIEC Median Family Income
+FFIEC Median family income in dollars for the MSA/MD in which the tract is located (adjusted annually by FFIEC)
+
+##### Tract to MSA MD Income Pct
+% of tract median family income compared to MSA/MD median family income
+
+##### Number of owner occupied units
+Number of dwellings, including individual condominiums, that are lived in by the owner
+
+##### Number of 1 to 4 family units
+Dwellings that are built to house fewer than 5 families
+
+##### Accepted
+Indicates whether the mortgage application was accepted (successfully originated) with a value of 1 or denied with a value of 0.  This feature is only present in the training set, and is the target variable for this analysis
+
+
+## Individual Feature Statistics
+Summary statistics were computed for each numeric column in the training dataset.  Results are below
+
+```{r echo=FALSE, warning = FALSE, message = FALSE} 
+unchanged_train_values %>% select_if(is.numeric) %>% summary() 
+
+``` 
+
+Most numeric columns show a slight right skew, since the median is less than the mean.  This is paricularly notable in the columns Loan Amount and Applicant Income, where there are maxima over 1000 times larger than the median.  A histogram of Applicant Income shows a peak near the median and a long right tail (note that this graph stops at an income of $2,500,000, even though income continues farther.  This is to show the majority of the data set up close)
+
+```{r echo=FALSE, warning = FALSE, message = FALSE} 
+unchanged_train_values %>% ggplot(aes(x = applicant_income)) + geom_histogram(binwidth = 10) + xlim(0,2500) + 
+  geom_vline(xintercept =74, color = 'red', size = 1) + labs(title = "Histogram of Applicant Income", x = "Applicant Income (in thousands of dollars)", y = 'Count') +
+  annotate("text", x = 500, y = 30000, label = "The red line shows the median")
+```
+
+A histogram of loan amount shows a similar trend
+
+```{r echo = FALSE, warning = FALSE, message = FALSE} 
+unchanged_train_values %>% ggplot(aes(x = loan_amount)) + geom_histogram(binwidth = 20) + xlim(0,2500) + 
+  geom_vline(xintercept = 162, color = 'red', size = 1) + labs(title = "Histogram of Loan Amounts", x = "Loan Amount (in thousands of dollars)", y = 'Count') +
+  annotate("text", x = 550, y = 30000, label = "The red line shows the median")
+```
+
+Missing values in the test and train data set can cause problems with analysis.  For numeric columns, missing values show up as NA, and the counts are visible in the data above.  These missing values for numeric columns were replaced with the median of that column's values.
+
+Factor statistics are below: 
+```{r echo=FALSE, warning = FALSE, message = FALSE} 
+unchanged_train_values %>% select_if(is.factor) %>% summary() 
+
+``` 
+
+There is class imbalance in several factors, but the target variable shows no imbalance, which makes predictions easier.  In particular, there is a large imbalance in property types and loan types, with very few manufactured houses or home improvement loans.  
+
+## Relationships with Accepted
+
+Several plots were created to determine the relationship between features and acceptance.  As a classification problem, these plots were generally box plots or bar plots (for categorical features) or histograms (for numeric features).
+
+### Numerical Relationships
+
+Certain lenders may be more likely to accept or decline applicants.  A histogram shows the acceptance rate for lenders between 0% and 100% (calculated as accepted applications divided by total applications for each lender).  Lenders who had reviewed fewer than five applications were ignored for the case of this visualization.
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+train_values %>% group_by(lender) %>%  summarise(lender_rate = mean(as.numeric(as.character(accepted))), 
+                                                 count = n()) %>%
+  filter(count >=5) %>% 
+  ggplot(aes(x = lender_rate)) + geom_histogram(binwidth = 0.05) + labs(title = 'Histogram of Lender Acceptance Rate',
+                                                                        x = 'Lender Acceptance Rate (binwidth = 0.05',
+                                                                        y = 'Count')
+```
+
+From this plot, it would appear that the distribution of lender acceptance is slightly left skewed, with a median near 0.65.  
+
+A similar plot was created for the MSA/MD acceptance rates, which shows an approximately normal distribution.  This was plotted twice--once with areas with fewer than five observations, and once without.  Notice the peaks at 0% and 100% that disappear without small counts.
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+train_values %>% group_by(msa_md,state_code,county_code) %>%  summarise(msa_md_rate = mean(as.numeric(as.character(accepted))), 
+                                                 count = n()) %>%
+  filter(count >=5) %>% 
+  ggplot(aes(x = msa_md_rate)) + geom_histogram(binwidth = 0.05) + labs(title = 'Histogram of MSA/MD Acceptance Rate without rare localities',
+                                                                        x = ' Acceptance Rate (binwidth = 0.05)',
+                                                                        y = 'Count')
+
+train_values %>% group_by(msa_md,state_code,county_code) %>%  summarise(msa_md_rate = mean(as.numeric(as.character(accepted))), count = n()) %>%
+  ggplot(aes(x = msa_md_rate)) + geom_histogram(binwidth = 0.05) + labs(title = 'Histogram of MSA/MD Acceptance Rate, with rare localities',
+                                                                        x = ' Acceptance Rate (binwidth = 0.05)',
+                                                                        y = 'Count')
+```
+
+The plots above show that lender and locality acceptance rates can differ dramatically, although this analysis makes no claim as to the cause
+
+An additional feature that appears to have a correlation with acceptance is the applicant's income compared to the FFIEC Median Income in the area.  A boxplot shows a difference (note that approximately 33,000 data points were cut off the top as outliers)
+
+```{r percent of income, echo = FALSE, warning = FALSE, message = FALSE}
+train_values %>% ggplot(aes(y = percent_of_income*1000, x = accepted)) + geom_boxplot()  + ylim(0,3) + 
+  theme( axis.ticks = element_blank()) + labs(title = 'Applicant % of FFIEC Income by Acceptance', 
+                                              x = 'Accepted',
+                                              y = 'Applicant Income/FFIEC Median Income')
+```
+
+Loan percent (the ratio of loan amount to the applicant's income), also shows a small difference between accepted and denied, with a thicker tail for denied and a higher value of accepted for the lower ranges.  
+
+```{r loan percent, echo = FALSE, warning = FALSE, message = FALSE}
+train_values %>% ggplot(aes()) + geom_freqpoly(aes(x = loan_percent,color = accepted, stat(density)), binwidth = .6) + xlim(0,20) 
+
+
+```
+
+### Categorical Relationships
+Most of the features used in the model are categorical.  To visualize these, boxplots or barplots were used.
+
+As ethnicity and race are often linked, they were combined together into one feature, which resulted in up to 28 different factors; however, some combinations were not seen.  Because the counts of these combinations were very different, three plots were created so that groups with similar counts could be compared.
+
+```{r race ethn, echo = FALSE, warning = FALSE, message = FALSE}
+train_values %>% mutate(ethn_race = paste(applicant_ethnicity,applicant_race)) %>% group_by(ethn_race) %>% 
+  mutate(count = n()) %>% filter(count >= 20000) %>% ungroup() %>% 
+  ggplot(aes(x = ethn_race, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count') +
+  labs(title = 'Large Counts (n > 25000)',
+       x = 'Ethnicity and Race',
+       y = 'Count', subtitle = 'White and Asian non-Hispanics have a majority  accepted')
+
+train_values %>% mutate(ethn_race = paste(applicant_ethnicity,applicant_race)) %>% group_by(ethn_race) %>% 
+  mutate(count = n()) %>% filter(count <= 20000 && count >= 1000) %>% ungroup() %>% 
+  ggplot(aes(x = ethn_race, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count') +
+  labs(title = 'Medium Counts (n > 1000)',
+       x = 'Ethnicity and Race',
+       y = 'Count', subtitle = 'Corporations are the only medium count where the majority are accepted')
+
+train_values %>% mutate(ethn_race = paste(applicant_ethnicity,applicant_race)) %>% group_by(ethn_race) %>% 
+  mutate(count = n()) %>% filter(count <= 1000) %>% ungroup() %>% 
+  ggplot(aes(x = ethn_race, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count') +
+  labs(title = 'Small Counts (n < 1000)',
+       x = 'Ethnicity and Race',
+       y = 'Count', subtitle = 'Black Hispanics are denied at almost double the rate they are accepted')
+train_values %>% group_by(applicant_race) %>% summarise(rate = mean(as.numeric(as.character(accepted)))) %>% kable()
+train_values %>% group_by(applicant_ethnicity) %>% summarise(rate = mean(as.numeric(as.character(accepted)))) %>% kable()
+
+```
+
+The graphs and table show that Whites and Asians (race codes 2 and 5), as well as non-hispanics (ethnicity code 2), are accepted at a greater than 50% rate, while non-human entities (typically corporations, ethnicity code 4 and race code 7) were accepted at almost 80% rates.  Minorities other than Asian were typically denied.
+
+A similar trend shows up with sex.  Note that in the following graph, code 4 (not applicable, typically corporations) was excluded.  
+```{r applicant sex, echo = FALSE, warnings = FALSE}
+train_values %>% filter(applicant_sex != 4) %>% ggplot(aes(x = applicant_sex, fill = accepted)) + 
+  geom_bar(position = "dodge") + labs(title = 'Applicant Sex by Acceptance',
+                                     subtitle =  'Only males were accepted at more than 50%',
+                                     x = 'Applicant Sex',
+                                     y = 'Count')
+```
+
+Finally, loan purpose showed a clear distiction--loans to buy a house were approved more often than not. However, loans for refinancing or home improvement were typically not approved.
+
+```{r loan purpose, echo = FALSE, warning = FALSE, message = FALSE}
+train_values %>% ggplot(aes(x = loan_purpose, fill = accepted)) + 
+  geom_bar(position = "dodge") + 
+  labs(x = 'Loan Purpose',
+       y = 'Count',
+       title = 'Loan Purpose by Acceptance',
+       subtitle = 'Loan Purpose shows a clear distinction')
+```
+
+
+
+Certain combinations of other features led to distinctions. By combining property type and occupancy, a feature was created which helps clarify combinations of what the mortgage is for and who lives there.  Examples of combinations include owner-occupied one family housing (i.e., single family homes), or non-owner-occupied multifamily (i.e., apartment complexes).  There was significant variation both in acceptance rates and counts, so three different plots were used, as with race and ethnicity above. 
+
+```{r occ prop, echo = FALSE, warning = FALSE, message = FALSE}
+occ_prop_large_count <- train_values %>% mutate(occ_prop = paste(occupancy,property_type)) %>% group_by(occ_prop) %>% 
+  mutate(count = n()) %>% filter(count >= 100000) %>% ungroup() %>% 
+  ggplot(aes(x = occ_prop, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count')
+
+occ_prop_large_count + labs(title = 'Large Counts of Occupancy and Property Type merger',
+                            subtitle = 'Single Family homes were nearly a 50/50 toss up',
+                            x = 'Occupancy and Property Type Merger',
+                            y = 'Count')
+
+
+occ_prop_med_count <- train_values %>% mutate(occ_prop = paste(occupancy,property_type)) %>% group_by(occ_prop) %>% 
+  mutate(count = n()) %>% filter(count <= 100000 && count >= 10000) %>% ungroup() %>% 
+  ggplot(aes(x = occ_prop, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count')
+occ_prop_med_count + labs(title = 'Medium Counts of Occupancy and Property Type merger',
+                          subtitle = 'Owner-occupied manufactured Housing was typically denied',
+                          x = 'Occupancy and Property Type Merger',
+                          y = 'Count')
+
+occ_prop_small_count <- train_values %>% mutate(occ_prop = paste(occupancy,property_type)) %>% group_by(occ_prop) %>% 
+  mutate(count = n()) %>% filter(count <= 10000) %>% ungroup() %>% 
+  ggplot(aes(x = occ_prop, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count')
+
+occ_prop_small_count + labs(title = 'Small Counts of Occupancy and Property Type merger',
+                          subtitle = 'Significant variation occurs in small counts',
+                          x = 'Occupancy and Property Type Merger',
+                          y = 'Count')
+```
+
+Finally, whether applicants requested pre-approval was combined with the loan type to create another feature which showed large differences.  
+
+```{r pre type, echo = FALSE, warning = FALSE, message = FALSE}
+pre_type_large <- train_values %>% mutate(pre_type = paste(preapproval,loan_type)) %>% group_by(pre_type) %>% 
+  mutate(count = n()) %>% filter(count >= 100000) %>% ungroup() %>% 
+  ggplot(aes(x = pre_type, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count')
+pre_type_large + labs(title = 'Large Counts of Pre-Approval and Loan Type merger',
+                      subtitle = 'No pre-approval conventional loans were accepted slightly less than half the time',
+                      x = 'Pre-Approval and Loan Type Merger',
+                      y = 'Count')
+
+pre_type_med <- train_values %>% mutate(pre_type = paste(preapproval,loan_type)) %>% group_by(pre_type) %>% 
+  mutate(count = n()) %>% filter(count <= 100000 && count > 10000) %>% ungroup() %>% 
+  ggplot(aes(x = pre_type, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count')
+pre_type_med + labs(title = 'Medium Counts of Pre-Approval and Loan Type merger',
+                      subtitle = 'People who applied for pre-approval were accepted far less',
+                      x = 'Pre-Approval and Loan Type Merger',
+                      y = 'Count')
+
+pre_type_small <- train_values %>% mutate(pre_type = paste(preapproval,loan_type)) %>% group_by(pre_type) %>% 
+  mutate(count = n()) %>% filter(count <= 10000) %>% ungroup() %>% 
+  ggplot(aes(x = pre_type, fill = accepted)) +
+  geom_bar(position = 'dodge', stat = 'count')
+pre_type_small + labs(title = 'Small Counts of Pre-Approval and Loan Type merger',
+                    subtitle = 'Pre-approval trends remained true across loan types',
+                    x = 'Pre-Approval and Loan Type Merger',
+                    y = 'Count')
+```
+
+People who applied for pre-approval (codes starting with 1) were accepted far less often in all cases than those who did not.  This result is surprising, but perhaps means that those who were initiall less likely to be accepted would apply for pre-approval to help their chances.
+
+# Classification Results
+Based on the analysis of the mortgage data, a series of predictive models were used to classify applications into accepted or denied.  Four models were used
+1. GLM - A generalized linear model
+2. LDA - Linear Discriminant Analysis
+3. GBM - Generalized Boosted Regression Models
+4. RF - The ranger implementation of the random forest mmodel
+
+The first two models were typically used to see if changes would be likely to increase or decrease accuracy.  Both had runtimes in the range of 10-45 seconds on the training set.  GBM had runtimes around 10-20 minutes, while the ranger algorithm could take up to five hours to run.  Ranger was typically the most accurate, but because it was so time-intensive it was used sparingly after changes had produced positve results in the other models.  
+
+For performance reasons, some of the larger factors (MSA/MD and Lender, among others) were turned into numerical features by calculating the acceptance rate for each level.  This made it possible to run the analysis on a personal laptop while still including important features.
+
+Each model was trained using 5-fold cross validation on 90% of the training set. The model was then tested on the remaining 10%.  Results above .72 were used on the test data and submitted. The most accurate model is detailed below with a confusion matrix
+```{r model results, echo = FALSE, warning = FALSE, message = FALSE}
+pred_rf <- read_csv('pred_rf.csv', col_names = c('Prediction'))
+pred_rf$Prediction <- as.factor(pred_rf$Prediction)
+cm <- confusionMatrix(pred_rf$Prediction,split_test$accepted)
+cm
+
+```
+
+This model used the ranger algorithm.  The accuracy was 0.7291 (which translated to 0.7155 on the official test set), which indicates some overfitting.  Attempts were made to reduce overfitting by using cross validation.  The sensitivity was low, indicating a low true positive rate, while the specificity is high, indicating a low false positive rate.  This suggests that the model is underestimating the chances for each applicant.  
+
+A ROC curve of the model is plotted below.  The AUC is 0.811, and the F1 Score is 0.71.  
+```{r roc curve, echo = FALSE, warning = FALSE, message = FALSE}
+x <- read.csv('prob_rf.csv')
+colnames(x) <- c('N','Y')
+library(pROC)
+roc(split_test$accepted,x$Y, plot = T, 
+    auc.polygon = T, grid = T, print.auc = T)
+```
+
+# Conclusion
+This analysis has shown that whether a mortgage application is accepted can be predicted from features of the application.  In a troubling result, some of the features which lead to the most accuracy are features which should not be considered&mdash;race, ethnicity, and sex.  Additional research needs to be done to determine if these features are indicative of something else (income, location, etc.) or whether they are used in applications (which is against the law).  
+
+
+Other characteristics of the application which affect approval dramatically are less troublesome.  Corporations are far more likely to have their mortgage applications accepted, while the lower the income is compared to the loan amount requested, the less likely the application is to be approved.
